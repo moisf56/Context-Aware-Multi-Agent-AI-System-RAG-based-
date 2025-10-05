@@ -1,0 +1,44 @@
+# Core LangChain and LangGraph packages
+langchain
+langchain-core
+langchain-community
+langchain_chroma
+langgraph
+langchain-tavily
+langchain-text-splitters
+langchain_huggingface
+
+# FastAPI and web server
+fastapi
+uvicorn[standard]
+pydantic
+flask
+
+# AWS SDK for Bedrock
+boto3
+botocore
+
+# Database connectivity (PostgreSQL)
+psycopg2-binary
+sqlalchemy
+
+# Vector database and embeddings
+chromadb
+sentence-transformers
+torch  # Required for sentence-transformers
+
+# Document processing
+pypdf
+python-multipart
+python-dotenv
+
+# General utilities
+requests
+numpy
+typing-extensions
+
+# Optional: For better performance
+faiss-cpu
+
+# Environment and configuration
+python-decouple

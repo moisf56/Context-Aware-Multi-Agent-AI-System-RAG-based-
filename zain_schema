@@ -1,0 +1,533 @@
+-- Zain Kuwait Telecom Database for Multi-Agent AI System
+-- Optimized for AWS RDS PostgreSQL
+-- Company: Zain Kuwait MVP
+-- Version: 1.0
+
+-- Enable necessary extensions
+CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
+CREATE EXTENSION IF NOT EXISTS "pg_trgm"; -- For fuzzy text search
+
+-- =========================================
+-- VALIDATION POOLS (for MVP testing)
+-- =========================================
+
+-- Valid Kuwait Civil ID numbers pool for testing
+CREATE TABLE valid_civil_ids (
+    civil_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    civil_id_number VARCHAR(12) UNIQUE NOT NULL, -- Kuwait Civil ID is 12 digits
+    is_used BOOLEAN DEFAULT FALSE,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Service coverage areas in Kuwait
+CREATE TABLE service_areas (
+    area_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    area_name VARCHAR(100) NOT NULL,
+    governorate VARCHAR(50) NOT NULL, -- Kuwait governorates
+    district VARCHAR(50) NOT NULL,
+    fiber_available BOOLEAN DEFAULT FALSE,
+    coverage_quality VARCHAR(20) CHECK (coverage_quality IN ('excellent', 'good', 'basic')) DEFAULT 'good',
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Branch locations for in-person payments
+CREATE TABLE branch_locations (
+    branch_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    branch_name VARCHAR(100) NOT NULL,
+    governorate VARCHAR(50) NOT NULL,
+    district VARCHAR(50) NOT NULL,
+    address TEXT NOT NULL,
+    phone VARCHAR(20),
+    working_hours VARCHAR(100) DEFAULT '08:00-20:00 الأحد-الخميس', -- Sunday-Thursday in Arabic
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+-- =========================================
+-- CORE BUSINESS TABLES
+-- =========================================
+
+-- Customer accounts
+CREATE TABLE customers (
+    customer_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    civil_id_number VARCHAR(12) UNIQUE NOT NULL,
+    first_name VARCHAR(50) NOT NULL,
+    last_name VARCHAR(50) NOT NULL,
+    birth_date DATE NOT NULL,
+    phone VARCHAR(20) UNIQUE,
+    email VARCHAR(320),
+
+    -- Address information
+    address TEXT NOT NULL,
+    area_id UUID REFERENCES service_areas(area_id),
+
+    -- Account status
+    account_status VARCHAR(20) CHECK (account_status IN ('active', 'suspended', 'closed')) DEFAULT 'active',
+    customer_type VARCHAR(20) CHECK (customer_type IN ('individual', 'corporate')) DEFAULT 'individual',
+    registration_date DATE DEFAULT CURRENT_DATE,
+
+    -- Customer value metrics
+    total_spending DECIMAL(10,3) DEFAULT 0.000, -- KWD uses 3 decimal places
+    payment_method VARCHAR(20) CHECK (payment_method IN ('credit_card', 'bank_transfer', 'cash', 'direct_debit', 'knet')) DEFAULT 'knet',
+
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Available services and packages
+CREATE TABLE services (
+    service_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    service_name VARCHAR(100) NOT NULL,
+    service_type VARCHAR(30) CHECK (service_type IN ('fiber', 'adsl', 'mobile_internet', 'mobile_voice', 'tv', 'bundle')) NOT NULL,
+
+    -- Technical specifications
+    speed_mbps INTEGER, -- Internet speed
+    data_limit_gb INTEGER, -- Data allowance (NULL for unlimited)
+    voice_minutes INTEGER, -- Voice minutes (for mobile plans)
+
+    -- Pricing in KWD
+    monthly_price_kwd DECIMAL(10,3) NOT NULL,
+    installation_fee_kwd DECIMAL(10,3) DEFAULT 0.000,
+
+    -- Availability
+    requires_technician BOOLEAN DEFAULT FALSE,
+    fiber_required BOOLEAN DEFAULT FALSE, -- Must be in fiber coverage area
+
+    -- Service details
+    service_description TEXT,
+    contract_duration_months INTEGER DEFAULT 12,
+
+    is_active BOOLEAN DEFAULT TRUE,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Dynamic pricing rules
+CREATE TABLE service_pricing (
+    pricing_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    service_id UUID REFERENCES services(service_id) ON DELETE CASCADE,
+    area_id UUID REFERENCES service_areas(area_id) ON DELETE CASCADE,
+
+    -- Pricing modifiers in KWD
+    base_price_kwd DECIMAL(10,3) NOT NULL,
+    area_modifier DECIMAL(5,4) DEFAULT 1.0000, -- Multiply base price (1.2 = 20% more expensive)
+    promotion_discount DECIMAL(5,4) DEFAULT 0.0000, -- Subtract from price (0.1 = 10% discount)
+
+    -- Validity
+    valid_from DATE DEFAULT CURRENT_DATE,
+    valid_until DATE,
+
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Customer subscriptions (active services)
+CREATE TABLE customer_subscriptions (
+    subscription_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    customer_id UUID REFERENCES customers(customer_id) ON DELETE CASCADE,
+    service_id UUID REFERENCES services(service_id),
+
+    -- Subscription details
+    start_date DATE NOT NULL DEFAULT CURRENT_DATE,
+    end_date DATE, -- NULL for ongoing subscriptions
+    monthly_price_kwd DECIMAL(10,3) NOT NULL, -- Actual price paid (after discounts)
+
+    -- Status
+    status VARCHAR(20) CHECK (status IN ('active', 'suspended', 'cancelled', 'pending_installation')) DEFAULT 'pending_installation',
+    installation_required BOOLEAN DEFAULT FALSE,
+    installation_completed BOOLEAN DEFAULT FALSE,
+
+    -- Contract info
+    contract_start DATE,
+    contract_end DATE,
+    auto_renewal BOOLEAN DEFAULT TRUE,
+
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Support tickets and customer requests
+CREATE TABLE support_tickets (
+    ticket_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    customer_id UUID REFERENCES customers(customer_id) ON DELETE CASCADE,
+    subscription_id UUID REFERENCES customer_subscriptions(subscription_id), -- Optional
+
+    -- Ticket details
+    ticket_type VARCHAR(30) CHECK (ticket_type IN ('technical_issue', 'billing_inquiry', 'service_change', 'complaint', 'new_subscription', 'cancellation')) NOT NULL,
+    title VARCHAR(200) NOT NULL,
+    description TEXT NOT NULL,
+
+    -- Status and priority
+    status VARCHAR(20) CHECK (status IN ('open', 'in_progress', 'resolved', 'closed', 'escalated')) DEFAULT 'open',
+    priority VARCHAR(10) CHECK (priority IN ('low', 'medium', 'high', 'urgent')) DEFAULT 'medium',
+
+    -- Assignment
+    assigned_agent VARCHAR(50), -- AI agent or human agent ID
+    resolution TEXT,
+    resolution_date TIMESTAMP WITH TIME ZONE,
+
+    -- AI-specific fields
+    ai_generated BOOLEAN DEFAULT TRUE,
+    conversation_id UUID, -- Link to agent conversation
+
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Technician visits and installations
+CREATE TABLE technician_visits (
+    visit_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    customer_id UUID REFERENCES customers(customer_id) ON DELETE CASCADE,
+    subscription_id UUID REFERENCES customer_subscriptions(subscription_id),
+    ticket_id UUID REFERENCES support_tickets(ticket_id), -- Optional
+
+    -- Visit details
+    visit_type VARCHAR(30) CHECK (visit_type IN ('installation', 'repair', 'maintenance', 'upgrade')) NOT NULL,
+    scheduled_date DATE NOT NULL,
+    scheduled_time_slot VARCHAR(20) NOT NULL, -- '08:00-10:00', '10:00-12:00', etc.
+
+    -- Status tracking
+    status VARCHAR(20) CHECK (status IN ('scheduled', 'confirmed', 'in_progress', 'completed', 'cancelled', 'rescheduled')) DEFAULT 'scheduled',
+
+    -- Visit results
+    technician_name VARCHAR(100),
+    arrival_time TIMESTAMP WITH TIME ZONE,
+    completion_time TIMESTAMP WITH TIME ZONE,
+    work_description TEXT,
+    customer_satisfaction INTEGER CHECK (customer_satisfaction BETWEEN 1 AND 5),
+
+    -- Technical details
+    equipment_installed TEXT,
+    test_results JSONB DEFAULT '{}',
+
+    -- Rescheduling
+    reschedule_reason TEXT,
+    original_visit_id UUID REFERENCES technician_visits(visit_id), -- If rescheduled
+
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Billing and invoices
+CREATE TABLE billing (
+    bill_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    customer_id UUID REFERENCES customers(customer_id) ON DELETE CASCADE,
+
+    -- Bill details
+    bill_date DATE NOT NULL DEFAULT CURRENT_DATE,
+    due_date DATE NOT NULL,
+    billing_period_start DATE NOT NULL,
+    billing_period_end DATE NOT NULL,
+
+    -- Amounts in Kuwaiti Dinar (KWD)
+    subtotal_kwd DECIMAL(10,3) NOT NULL DEFAULT 0.000,
+    tax_kwd DECIMAL(10,3) NOT NULL DEFAULT 0.000, -- Kuwait VAT if applicable
+    total_amount_kwd DECIMAL(10,3) NOT NULL DEFAULT 0.000,
+
+    -- Payment info
+    payment_status VARCHAR(20) CHECK (payment_status IN ('pending', 'paid', 'overdue', 'cancelled')) DEFAULT 'pending',
+    payment_date DATE,
+    payment_method VARCHAR(20),
+    payment_reference VARCHAR(100),
+
+    -- Bill items (JSONB for flexibility)
+    bill_items JSONB DEFAULT '[]', -- [{"service": "Fiber 100 Mbps", "amount": 25.500, "period": "2024-01"}]
+
+    -- Links
+    payment_link VARCHAR(500), -- External payment gateway URL
+    pdf_link VARCHAR(500), -- Bill PDF URL
+
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+-- =========================================
+-- AI MEMORY & CONVERSATION SYSTEM
+-- =========================================
+
+-- Main conversation sessions (supervisor level)
+CREATE TABLE agent_conversations (
+    conversation_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    customer_id UUID REFERENCES customers(customer_id), -- NULL for prospects
+    prospect_civil_id VARCHAR(12), -- For potential customers
+
+    -- Session management
+    session_status VARCHAR(20) CHECK (session_status IN ('active', 'completed', 'abandoned', 'transferred')) DEFAULT 'active',
+    conversation_state VARCHAR(30) CHECK (conversation_state IN ('greeting', 'collecting_info', 'showing_services', 'scheduling', 'confirming', 'completed')) DEFAULT 'greeting',
+
+    -- Context and memory
+    conversation_summary TEXT, -- Periodically updated summary
+    context_variables JSONB DEFAULT '{}', -- Current session data: user preferences, selections, etc.
+    collected_entities JSONB DEFAULT '{}', -- Extracted info: {name, civil_id, address, service_interest}
+
+    -- Conversation metadata
+    channel VARCHAR(20) DEFAULT 'voice', -- voice, chat, phone
+    language VARCHAR(5) DEFAULT 'ar', -- Arabic default
+
+    -- Timing
+    session_start TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    session_end TIMESTAMP WITH TIME ZONE,
+    last_activity TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Individual messages and agent responses
+CREATE TABLE conversation_messages (
+    message_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    conversation_id UUID REFERENCES agent_conversations(conversation_id) ON DELETE CASCADE,
+
+    -- Message sequencing
+    sequence_number INTEGER NOT NULL,
+
+    -- Agent routing
+    routed_agent VARCHAR(30) CHECK (routed_agent IN ('supervisor', 'direct_response', 'websearch', 'nl2sql', 'rag')) NOT NULL,
+    routing_reason TEXT, -- Why this agent was selected
+
+    -- Message content
+    user_message TEXT NOT NULL,
+    ai_response TEXT NOT NULL,
+
+    -- Processing metadata
+    response_time_ms INTEGER, -- Agent processing time
+    confidence_score DECIMAL(3,2), -- Agent confidence (0.0-1.0)
+
+    -- Entity extraction
+    extracted_entities JSONB DEFAULT '{}', -- New entities found in this exchange
+
+    -- Database operations performed (for nl2sql agent)
+    sql_queries_executed JSONB DEFAULT '[]', -- Track what queries were run
+    database_changes JSONB DEFAULT '{}', -- What was inserted/updated
+
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Prospect interactions (before becoming customers)
+CREATE TABLE prospect_interactions (
+    prospect_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    conversation_id UUID REFERENCES agent_conversations(conversation_id) ON DELETE CASCADE,
+
+    -- Collected prospect information
+    collected_info JSONB DEFAULT '{}', -- All info gathered: {name, civil_id, address, interested_services}
+    qualification_score DECIMAL(3,2), -- How likely to convert (0.0-1.0)
+
+    -- Journey tracking
+    journey_stage VARCHAR(30) CHECK (journey_stage IN ('initial_contact', 'info_gathering', 'service_presentation', 'pricing_discussion', 'scheduling', 'contract_ready', 'completed', 'lost')) DEFAULT 'initial_contact',
+
+    -- Conversion tracking
+    converted_to_customer BOOLEAN DEFAULT FALSE,
+    customer_id UUID REFERENCES customers(customer_id), -- Set if converted
+    conversion_date TIMESTAMP WITH TIME ZONE,
+
+    -- Follow-up
+    follow_up_required BOOLEAN DEFAULT FALSE,
+    next_contact_date DATE,
+    notes TEXT,
+
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+-- =========================================
+-- INDEXES FOR AI PERFORMANCE
+-- =========================================
+
+-- Customer lookups
+CREATE INDEX idx_customers_civil_id ON customers(civil_id_number);
+CREATE INDEX idx_customers_phone ON customers(phone);
+CREATE INDEX idx_customers_area ON customers(area_id);
+CREATE INDEX idx_customers_status ON customers(account_status);
+
+-- Service queries
+CREATE INDEX idx_services_type ON services(service_type);
+CREATE INDEX idx_services_active ON services(is_active);
+CREATE INDEX idx_service_pricing_area ON service_pricing(area_id);
+CREATE INDEX idx_service_pricing_service ON service_pricing(service_id);
+
+-- Subscription management
+CREATE INDEX idx_subscriptions_customer ON customer_subscriptions(customer_id);
+CREATE INDEX idx_subscriptions_status ON customer_subscriptions(status);
+CREATE INDEX idx_subscriptions_service ON customer_subscriptions(service_id);
+
+-- Support and visits
+CREATE INDEX idx_tickets_customer ON support_tickets(customer_id);
+CREATE INDEX idx_tickets_status ON support_tickets(status);
+CREATE INDEX idx_tickets_conversation ON support_tickets(conversation_id);
+CREATE INDEX idx_visits_customer ON technician_visits(customer_id);
+CREATE INDEX idx_visits_date ON technician_visits(scheduled_date);
+CREATE INDEX idx_visits_status ON technician_visits(status);
+
+-- Billing
+CREATE INDEX idx_billing_customer ON billing(customer_id);
+CREATE INDEX idx_billing_status ON billing(payment_status);
+CREATE INDEX idx_billing_date ON billing(bill_date);
+
+-- AI conversation system
+CREATE INDEX idx_conversations_customer ON agent_conversations(customer_id);
+CREATE INDEX idx_conversations_civil_id ON agent_conversations(prospect_civil_id);
+CREATE INDEX idx_conversations_status ON agent_conversations(session_status);
+CREATE INDEX idx_conversations_state ON agent_conversations(conversation_state);
+CREATE INDEX idx_conversations_activity ON agent_conversations(last_activity);
+
+CREATE INDEX idx_messages_conversation ON conversation_messages(conversation_id);
+CREATE INDEX idx_messages_sequence ON conversation_messages(conversation_id, sequence_number);
+CREATE INDEX idx_messages_agent ON conversation_messages(routed_agent);
+CREATE INDEX idx_messages_time ON conversation_messages(created_at);
+
+CREATE INDEX idx_prospects_conversation ON prospect_interactions(conversation_id);
+CREATE INDEX idx_prospects_stage ON prospect_interactions(journey_stage);
+CREATE INDEX idx_prospects_converted ON prospect_interactions(converted_to_customer);
+
+-- JSONB indexes for flexible queries
+CREATE INDEX idx_conversations_context ON agent_conversations USING gin(context_variables);
+CREATE INDEX idx_conversations_entities ON agent_conversations USING gin(collected_entities);
+CREATE INDEX idx_messages_entities ON conversation_messages USING gin(extracted_entities);
+CREATE INDEX idx_prospects_info ON prospect_interactions USING gin(collected_info);
+CREATE INDEX idx_billing_items ON billing USING gin(bill_items);
+
+-- =========================================
+-- TRIGGERS AND FUNCTIONS
+-- =========================================
+
+-- Update last_activity when new messages are added
+CREATE OR REPLACE FUNCTION update_conversation_activity()
+RETURNS TRIGGER AS $$
+BEGIN
+    UPDATE agent_conversations
+    SET
+        last_activity = NEW.created_at,
+        -- Increment context variables with message count
+        context_variables = context_variables || jsonb_build_object('total_messages',
+            COALESCE((context_variables->>'total_messages')::int, 0) + 1)
+    WHERE conversation_id = NEW.conversation_id;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER trigger_update_conversation_activity
+    AFTER INSERT ON conversation_messages
+    FOR EACH ROW
+    EXECUTE FUNCTION update_conversation_activity();
+
+-- Auto-update timestamps
+CREATE OR REPLACE FUNCTION update_updated_at_column()
+RETURNS TRIGGER AS $$
+BEGIN
+    NEW.updated_at = CURRENT_TIMESTAMP;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+-- Apply updated_at triggers
+CREATE TRIGGER trigger_customers_updated_at BEFORE UPDATE ON customers FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+CREATE TRIGGER trigger_subscriptions_updated_at BEFORE UPDATE ON customer_subscriptions FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+CREATE TRIGGER trigger_tickets_updated_at BEFORE UPDATE ON support_tickets FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+CREATE TRIGGER trigger_visits_updated_at BEFORE UPDATE ON technician_visits FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+CREATE TRIGGER trigger_billing_updated_at BEFORE UPDATE ON billing FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+CREATE TRIGGER trigger_prospects_updated_at BEFORE UPDATE ON prospect_interactions FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+
+-- =========================================
+-- VIEWS FOR AI AGENTS
+-- =========================================
+
+-- Customer 360 view for AI agents
+CREATE VIEW customer_360_view AS
+SELECT
+    c.*,
+    sa.area_name,
+    sa.governorate,
+    sa.district,
+    sa.fiber_available,
+
+    -- Active subscriptions
+    active_subs.active_services,
+    active_subs.monthly_total_kwd,
+
+    -- Recent interactions
+    recent_activity.last_ticket_date,
+    recent_activity.last_conversation_date,
+    recent_activity.total_tickets,
+
+    -- Billing status
+    billing_info.current_balance_kwd,
+    billing_info.payment_status as current_payment_status
+
+FROM customers c
+LEFT JOIN service_areas sa ON c.area_id = sa.area_id
+LEFT JOIN (
+    SELECT
+        customer_id,
+        COUNT(*) as active_services,
+        SUM(monthly_price_kwd) as monthly_total_kwd
+    FROM customer_subscriptions
+    WHERE status = 'active'
+    GROUP BY customer_id
+) active_subs ON c.customer_id = active_subs.customer_id
+LEFT JOIN (
+    SELECT
+        customer_id,
+        MAX(created_at) as last_ticket_date,
+        COUNT(*) as total_tickets
+    FROM support_tickets
+    GROUP BY customer_id
+) recent_activity ON c.customer_id = recent_activity.customer_id
+LEFT JOIN (
+    SELECT
+        customer_id,
+        MAX(created_at) as last_conversation_date
+    FROM agent_conversations
+    GROUP BY customer_id
+) conversations ON c.customer_id = conversations.customer_id
+LEFT JOIN (
+    SELECT
+        customer_id,
+        SUM(CASE WHEN payment_status = 'pending' THEN total_amount_kwd ELSE 0 END) as current_balance_kwd,
+        MAX(payment_status) as payment_status
+    FROM billing
+    WHERE payment_status IN ('pending', 'overdue')
+    GROUP BY customer_id
+) billing_info ON c.customer_id = billing_info.customer_id;
+
+-- Active conversations view for supervisor agent
+CREATE VIEW active_conversations_view AS
+SELECT
+    ac.*,
+    c.first_name,
+    c.last_name,
+    c.phone,
+    recent_messages.last_message,
+    recent_messages.last_agent,
+    recent_messages.total_exchanges
+FROM agent_conversations ac
+LEFT JOIN customers c ON ac.customer_id = c.customer_id
+LEFT JOIN (
+    SELECT
+        conversation_id,
+        MAX(user_message) as last_message,
+        MAX(routed_agent) as last_agent,
+        COUNT(*) as total_exchanges
+    FROM conversation_messages
+    GROUP BY conversation_id
+) recent_messages ON ac.conversation_id = recent_messages.conversation_id
+WHERE ac.session_status = 'active'
+ORDER BY ac.last_activity DESC;
+
+-- Service availability view for sales
+CREATE VIEW service_availability_view AS
+SELECT
+    s.*,
+    sa.area_name,
+    sa.governorate,
+    sa.district,
+    sa.fiber_available,
+    COALESCE(sp.base_price_kwd * sp.area_modifier - sp.promotion_discount, s.monthly_price_kwd) as effective_price_kwd
+FROM services s
+CROSS JOIN service_areas sa
+LEFT JOIN service_pricing sp ON s.service_id = sp.service_id AND sa.area_id = sp.area_id
+WHERE s.is_active = TRUE
+    AND (s.fiber_required = FALSE OR sa.fiber_available = TRUE)
+ORDER BY sa.area_name, s.service_type, s.monthly_price_kwd;
+
+-- Comments for documentation
+COMMENT ON TABLE customers IS 'Customer accounts with Kuwait context (Civil ID numbers, addresses)';
+COMMENT ON TABLE agent_conversations IS 'Supervisor-level conversation sessions with state tracking';
+COMMENT ON TABLE conversation_messages IS 'Individual message exchanges with agent routing information';
+COMMENT ON TABLE service_areas IS 'Kuwait governorates and districts with fiber availability';
+COMMENT ON TABLE services IS 'Available telecom services (fiber, ADSL, mobile, TV) priced in KWD';
+COMMENT ON COLUMN agent_conversations.context_variables IS 'Session state: current step, user selections, preferences';
+COMMENT ON COLUMN conversation_messages.routed_agent IS 'Which agent handled this exchange: supervisor, direct_response, websearch, nl2sql, rag';
